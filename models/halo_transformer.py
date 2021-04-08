@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from layer import DropPath, tuple2
+from .layer import DropPath, tuple2
 
 LayerNorm = lambda x: nn.LayerNorm(x, eps=1e-6)
 

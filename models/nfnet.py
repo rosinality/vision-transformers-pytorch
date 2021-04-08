@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-import layer
+from models import layer
 
 
 class NFBlock(nn.Module):

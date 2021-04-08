@@ -14,6 +14,26 @@ def rescale_int(level, max_val, param_max=10):
     return int(level * max_val / param_max)
 
 
+def random_mirror(mirror, val):
+    if mirror and check_prob(0.5):
+        val *= -1
+
+    return val
+
+
+def apply_affine(img, translate, shear, resample, fillcolor):
+    trans_x, trans_y = translate
+    shear_x, shear_y = shear
+
+    return img.transform(
+        img.size,
+        Image.AFFINE,
+        (1, shear_x, trans_x, shear_y, 1, trans_y),
+        resample,
+        fillcolor=fillcolor,
+    )
+
+
 class AutoAugmentAffine(RandomTransform):
     def __init__(self, mirror=True, resample=Image.NEAREST, fillcolor=None, p=1.0):
         super().__init__(p)
@@ -45,6 +65,112 @@ class AutoAugmentAffine(RandomTransform):
             self.resample,
             fillcolor=self.fillcolor,
         )
+
+
+def shear_x(img, shear_x, mirror=True, resample=Image.NEAREST, fillcolor=None):
+    shear_x = random_mirror(mirror, shear_x)
+
+    return apply_affine(img, (0, 0), (shear_x, 0), resample, fillcolor)
+
+
+def shear_y(img, shear_y, mirror=True, resample=Image.NEAREST, fillcolor=None):
+    shear_y = random_mirror(mirror, shear_y)
+
+    return apply_affine(img, (0, 0), (0, shear_y), resample, fillcolor)
+
+
+def translate_x(img, translate_x, mirror=True, resample=Image.NEAREST, fillcolor=None):
+    translate_x = random_mirror(mirror, translate_x)
+
+    return apply_affine(img, (translate_x, 0), (0, 0), resample, fillcolor)
+
+
+def translate_y(img, translate_y, mirror=True, resample=Image.NEAREST, fillcolor=None):
+    translate_y = random_mirror(mirror, translate_y)
+
+    return apply_affine(img, (0, translate_y), (0, 0), resample, fillcolor)
+
+
+def rotate(img, rotate_value, mirror=True, resample=Image.NEAREST, fillcolor=None):
+    rotate_value = random_mirror(mirror, rotate_value)
+
+    return img.rotate(rotate_value, resample=resample, fillcolor=fillcolor)
+
+
+def posterize(img, bits):
+    return ImageOps.posterize(img, bits)
+
+
+def cutout(img, size, fillcolor=None):
+    x = random.random()
+    y = random.random()
+
+    w, h = img.size
+    c_x = int(x * w)
+    c_y = int(y * h)
+
+    x0 = max(0, c_x - size)
+    x1 = w - max(0, w - c_x - size) - 1
+    y0 = max(0, c_y - size)
+    y1 = h - max(0, h - c_y - size) - 1
+
+    xy = (x0, y0, x1, y1)
+    img = img.copy()
+    ImageDraw.Draw(img).rectangle(xy, fillcolor)
+
+    return img
+
+
+def solarize(img, threshold):
+    return ImageOps.solarize(img, threshold)
+
+
+def solarize_add(img, add, threshold=128):
+    lut = []
+
+    for i in range(256):
+        if i < threshold:
+            lut.append(min(255, i + add))
+
+        else:
+            lut.append(i)
+
+    if img.mode in ("L", "RGB"):
+        if img.mode == "RGB" and len(lut) == 256:
+            lut = lut + lut + lut
+
+        return img.point(lut)
+
+    else:
+        return img
+
+
+def saturation(img, saturate_value):
+    return ImageEnhance.Color(img).enhance(saturate_value)
+
+
+def contrast(img, contrast_value):
+    return ImageEnhance.Contrast(img).enhance(contrast_value)
+
+
+def brightness(img, brightness_value):
+    return ImageEnhance.Brightness(img).enhance(brightness_value)
+
+
+def sharpness(img, sharpness_value):
+    return ImageEnhance.Sharpness(img).enhance(sharpness_value)
+
+
+def invert(img):
+    return ImageOps.invert(img)
+
+
+def auto_contrast(img):
+    return ImageOps.autocontrast(img)
+
+
+def equalize(img):
+    return ImageOps.equalize(img)
 
 
 class ShearX(AutoAugmentAffine):
@@ -175,26 +301,6 @@ class Cutout(RandomTransform):
         return img
 
 
-def solarize_add(img, add, threshold=128):
-    lut = []
-
-    for i in range(256):
-        if i < threshold:
-            lut.append(min(255, i + add))
-
-        else:
-            lut.append(i)
-
-    if img.mode in ("L", "RGB"):
-        if img.mode == "RGB" and len(lut) == 256:
-            lut = lut + lut + lut
-
-        return img.point(lut)
-
-    else:
-        return img
-
-
 class Solarize(RandomTransform):
     def __init__(self, threshold, p=1.0):
         super().__init__(p)
@@ -274,31 +380,65 @@ class Sharpness(RandomTransform):
         return ImageEnhance.Sharpness(img).enhance(sharpness)
 
 
+def reparam_shear(level):
+    return rescale_float(level, 0.3)
+
+
+def reparam_translate(level, max_translate):
+    return rescale_int(level, max_translate)
+
+
+def reparam_rotate(level):
+    return rescale_int(level, 30)
+
+
+def reparam_solarize(level):
+    return rescale_int(level, 256)
+
+
+def reparam_solarize_increasing(level):
+    return 256 - rescale_int(level, 256)
+
+
+def reparam_posterize(level):
+    return rescale_int(level, 4)
+
+
+def reparam_posterize_increasing(level):
+    return 4 - rescale_int(level, 4)
+
+
+def reparam_color(level):
+    return rescale_float(level, 1.8) + 0.1
+
+
+def reparam_cutout(level, cutout):
+    return rescale_int(level, cutout)
+
+
+def reparam_solarize_add(level):
+    return rescale_int(level, 110)
+
+
 AUTOAUGMENT_MAP = {
-    "ShearX": (ShearX, lambda level: rescale_float(level, 0.3)),
-    "ShearY": (ShearY, lambda level: rescale_float(level, 0.3)),
-    "TranslateX": (
-        TranslateX,
-        lambda level, max_translate: rescale_int(level, max_translate),
-    ),
-    "TranslateY": (
-        TranslateY,
-        lambda level, max_translate: rescale_int(level, max_translate),
-    ),
-    "Rotate": (Rotate, lambda level: rescale_int(level, 30)),
-    "Solarize": (Solarize, lambda level: rescale_int(level, 256)),
-    "SolarizeIncreasing": (Solarize, lambda level: 256 - rescale_int(level, 256)),
-    "Posterize": (Posterize, lambda level: rescale_int(level, 4)),
-    "PosterizeIncreasing": (Posterize, lambda level: 4 - rescale_int(level, 4)),
-    "Contrast": (Contrast, lambda level: rescale_float(level, 1.8) + 0.1),
-    "Color": (Saturation, lambda level: rescale_float(level, 1.8) + 0.1),
-    "Brightness": (Brightness, lambda level: rescale_float(level, 1.8) + 0.1),
-    "Sharpness": (Sharpness, lambda level: rescale_float(level, 1.8) + 0.1),
-    "Invert": (transforms.Invert, None),
-    "AutoContrast": (transforms.AutoContrast, None),
-    "Equalize": (transforms.Equalize, None),
-    "Cutout": (Cutout, lambda level, cutout: rescale_int(level, cutout)),
-    "SolarizeAdd": (SolarizeAdd, lambda level: rescale_int(level, 110)),
+    "ShearX": (ShearX, shear_x, reparam_shear),
+    "ShearY": (ShearY, shear_y, reparam_shear),
+    "TranslateX": (TranslateX, translate_x, reparam_translate),
+    "TranslateY": (TranslateY, translate_y, reparam_translate),
+    "Rotate": (Rotate, rotate, reparam_rotate),
+    "Solarize": (Solarize, solarize, reparam_solarize),
+    "SolarizeIncreasing": (Solarize, solarize, reparam_solarize_increasing),
+    "Posterize": (Posterize, posterize, reparam_posterize),
+    "PosterizeIncreasing": (Posterize, posterize, reparam_posterize_increasing),
+    "Contrast": (Contrast, contrast, reparam_color),
+    "Color": (Saturation, saturation, reparam_color),
+    "Brightness": (Brightness, brightness, reparam_color),
+    "Sharpness": (Sharpness, sharpness, reparam_color),
+    "Invert": (transforms.Invert, invert, None),
+    "AutoContrast": (transforms.AutoContrast, auto_contrast, None),
+    "Equalize": (transforms.Equalize, equalize, None),
+    "Cutout": (Cutout, cutout, reparam_cutout),
+    "SolarizeAdd": (SolarizeAdd, solarize_add, reparam_solarize_add),
 }
 
 
@@ -338,7 +478,7 @@ def autoaugment_policy():
 
         for pol in policy:
             augment, prob, magnitude = pol
-            augment_fn, reparam_fn = AUTOAUGMENT_MAP[augment]
+            augment_fn, _, reparam_fn = AUTOAUGMENT_MAP[augment]
 
             if reparam_fn is not None:
                 magnitude = reparam_fn(magnitude)
@@ -383,33 +523,51 @@ class AutoAugment:
 
 class RandAugment:
     def __init__(
-        self, n_augment, magnitude, translate=100, cutout=40, fillcolor=(128, 128, 128)
+        self,
+        n_augment,
+        magnitude,
+        translate=100,
+        cutout=40,
+        fillcolor=(128, 128, 128),
+        increasing=False,
+        magnitude_std=0,
     ):
         self.n_augment = n_augment
         self.magnitude = magnitude
         self.translate = translate
         self.fillcolor = fillcolor
+        self.magnitude_std = magnitude_std
 
         # fmt: off
-        augment_list = [
-            "AutoContrast", "Equalize", "Invert", "Rotate", "Posterize", "Solarize",
-            "Color", "Contrast", "Brightness", "Sharpness", "ShearX",
-            "ShearY", "TranslateX", "TranslateY", "Cutout", "SolarizeAdd",
-        ]
+        if increasing:
+            augment_list = [
+                "AutoContrast", "Equalize", "Invert", "Rotate",
+                "PosterizeIncreasing", "SolarizeIncreasing",
+                "Color", "Contrast", "Brightness", "Sharpness", "ShearX",
+                "ShearY", "TranslateX", "TranslateY", "Cutout", "SolarizeAdd",
+            ]
+            
+        else:
+            augment_list = [
+                "AutoContrast", "Equalize", "Invert", "Rotate", "Posterize", "Solarize",
+                "Color", "Contrast", "Brightness", "Sharpness", "ShearX",
+                "ShearY", "TranslateX", "TranslateY", "Cutout", "SolarizeAdd",
+            ]
         # fmt: on
+
         self.augment = []
         for augment in augment_list:
-            augment_fn, reparam_fn = AUTOAUGMENT_MAP[augment]
+            _, augment_fn, reparam_fn = AUTOAUGMENT_MAP[augment]
+
+            reparam_fn_param = {}
+            augment_fn_param = {}
 
             if reparam_fn is not None:
                 if augment in ("TranslateX", "TranslateY"):
-                    mag = reparam_fn(magnitude, translate)
+                    reparam_fn_param = {"max_translate": translate}
 
                 elif augment == "Cutout":
-                    mag = reparam_fn(magnitude, cutout)
-
-                else:
-                    mag = reparam_fn(magnitude)
+                    reparam_fn_param = {"cutout": cutout}
 
                 if augment in (
                     "TranslateX",
@@ -419,15 +577,11 @@ class RandAugment:
                     "Rotate",
                     "Cutout",
                 ):
-                    augment_inst = augment_fn(mag, fillcolor=fillcolor, p=1.0)
+                    augment_fn_param = {"fillcolor": fillcolor}
 
-                else:
-                    augment_inst = augment_fn(mag, p=1.0)
-
-            else:
-                augment_inst = augment_fn(p=1.0)
-
-            self.augment.append(augment_inst)
+            self.augment.append(
+                (augment_fn, reparam_fn, augment_fn_param, reparam_fn_param)
+            )
 
     def __repr__(self):
         return f"{self.__class__.__name__}(n_augment={self.n_augment}, magnitude={self.magnitude})"
@@ -435,8 +589,18 @@ class RandAugment:
     def __call__(self, img):
         augments = random.choices(self.augment, k=self.n_augment)
 
-        for augment in augments:
-            sample = augment.sample()
-            img = augment.apply_img(img, **sample)
+        for augment, mag_fn, aug_param, reparam_param in augments:
+            if mag_fn is not None:
+                if self.magnitude_std > 0:
+                    mag = random.normalvariate(self.magnitude, self.magnitude_std)
+
+                else:
+                    mag = self.magnitude
+
+                mag = mag_fn(mag, **reparam_param)
+                img = augment(img, mag, **aug_param)
+
+            else:
+                img = augment(img, **aug_param)
 
         return img
