@@ -35,6 +35,11 @@ def patchify(input, size):
     )
 
 
+# Revised masking using Bernhard Walser's code
+# from https://github.com/berniwal/swin-transformer-pytorch
+# Much more cleaner than my mess. :)
+
+
 def create_mask(window_size, displacement, upper_lower, left_right):
     mask = torch.zeros(window_size ** 2, window_size ** 2)
 
