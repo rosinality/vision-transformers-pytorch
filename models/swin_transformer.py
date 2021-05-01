@@ -35,34 +35,6 @@ def patchify(input, size):
     )
 
 
-# Revised masking using Bernhard Walser's code
-# from https://github.com/berniwal/swin-transformer-pytorch
-# Much more cleaner than my mess. :)
-
-
-def create_mask(window_size, displacement, upper_lower, left_right):
-    mask = torch.zeros(window_size ** 2, window_size ** 2)
-
-    if upper_lower:
-        mask[-displacement * window_size :, : -displacement * window_size] = 1
-        mask[: -displacement * window_size, -displacement * window_size :] = 1
-
-    if left_right:
-        mask = mask.reshape(window_size, window_size, window_size, window_size)
-        mask[:, -displacement:, :, :-displacement] = float("-inf")
-        mask[:, :-displacement, :, -displacement:] = float("-inf")
-        mask = mask.reshape(window_size ** 2, window_size ** 2)
-
-    return mask
-
-
-def get_relative_distances(window_size):
-    indices = torch.cartesian_prod(torch.arange(7), torch.arange(7))
-    distances = indices[None, :, :] - indices[:, None, :]
-
-    return distances
-
-
 class MultiHeadedLocalAttention(nn.Module):
     def __init__(
         self, dim, n_head, dim_head, input_size, window_size, shift, dropout=0
@@ -72,7 +44,7 @@ class MultiHeadedLocalAttention(nn.Module):
         self.dim_head = dim_head
         self.n_head = n_head
 
-        self.weight = nn.Linear(dim, n_head * dim_head * 3, bias=False)
+        self.weight = nn.Linear(dim, n_head * dim_head * 3, bias=True)
         self.linear = nn.Linear(n_head * dim_head, dim)
 
         self.input_size = input_size
@@ -80,20 +52,66 @@ class MultiHeadedLocalAttention(nn.Module):
         self.dropout = dropout
         self.shift = shift
 
-        if shift:
-            roll = window_size // 2
-            self.register_buffer(
-                "ul_mask", create_mask(window_size, roll, True, False) > 0
-            )
-            self.register_buffer(
-                "lr_mask", create_mask(window_size, roll, False, True) > 0
-            )
-
-        pos = get_relative_distances(window_size) + window_size - 1
-        pos_y, pos_x = pos.unbind(-1)
-        self.register_buffer("pos", pos_y * (2 * window_size - 1) + pos_x)
+        y_pos, x_pos, local_mask = self.make_mask_pos(input_size, window_size, shift)
+        pos_size = y_pos.shape[0]
+        pos = y_pos * (2 * window_size - 1) + x_pos
+        self.register_buffer("pos", pos[0].reshape(window_size ** 2, window_size ** 2))
         self.rel_pos = nn.Embedding((2 * window_size - 1) ** 2, n_head)
         self.rel_pos.weight.detach().zero_()
+
+        if shift:
+            self.register_buffer(
+                "local_mask",
+                ~local_mask.reshape(pos_size, window_size ** 2, window_size ** 2),
+            )
+
+    def make_mask_pos(self, input_size, window_size, shift):
+        h, w = input_size
+        h //= window_size
+        w //= window_size
+        yy, xx = torch.meshgrid(
+            torch.arange(window_size * h), torch.arange(window_size * w)
+        )
+
+        if shift:
+            roll = -math.floor(window_size / 2)
+            yy = torch.roll(yy, (roll, roll), (0, 1))
+            xx = torch.roll(xx, (roll, roll), (0, 1))
+
+        y_c = (
+            yy.view(h, window_size, w, window_size)
+            .permute(0, 2, 1, 3)
+            .reshape(-1, window_size, window_size)
+        )
+        x_c = (
+            xx.view(h, window_size, w, window_size)
+            .permute(0, 2, 1, 3)
+            .reshape(-1, window_size, window_size)
+        )
+
+        x_diff = (
+            x_c.transpose(1, 2).unsqueeze(1) - x_c.transpose(1, 2).unsqueeze(2)
+        ).transpose(2, 3)
+        x_flag = x_diff.abs() < window_size
+        y_diff = y_c.unsqueeze(1) - y_c.unsqueeze(2)
+        y_flag = y_diff.abs() < window_size
+        x_diff = x_diff.unsqueeze(1)
+        y_diff = y_diff.unsqueeze(2)
+
+        if shift:
+            local_mask = x_flag.unsqueeze(1) & y_flag.unsqueeze(2)
+            x_diff = x_diff * local_mask
+            y_diff = y_diff * local_mask
+
+        else:
+            local_mask = None
+            x_diff = x_diff.expand(-1, window_size, -1, -1, -1)
+            y_diff = y_diff.expand(-1, -1, window_size, -1, -1)
+
+        x_pos = x_diff + (window_size - 1)
+        y_pos = y_diff + (window_size - 1)
+
+        return y_pos, x_pos, local_mask
 
     def forward(self, input):
         batch, height, width, dim = input.shape
@@ -116,8 +134,8 @@ class MultiHeadedLocalAttention(nn.Module):
                     self.n_head,
                     self.dim_head,
                 )
-                .permute(0, 5, 1, 3, 2, 4, 6)
-                .reshape(batch, self.n_head, -1, window * window, self.dim_head)
+                .permute(0, 1, 3, 5, 2, 4, 6)
+                .reshape(batch, -1, self.n_head, window * window, self.dim_head)
             )
 
         query, key, value = self.weight(input).chunk(3, dim=-1)  # B, S, H, W^2, D
@@ -126,16 +144,13 @@ class MultiHeadedLocalAttention(nn.Module):
         key = reshape(key).transpose(-2, -1)
         value = reshape(value)
 
-        score = query @ key / math.sqrt(self.dim_head)  # B, H, S, W^2, W^2
+        score = query @ key / math.sqrt(self.dim_head)  # B, S, H, W^2, W^2
         rel_pos = self.rel_pos(self.pos)  # W^2, W^2, H
-        score = score + rel_pos.permute(2, 0, 1).reshape(
-            1, self.n_head, 1, window * window, window * window
-        )
+        score = score + rel_pos.permute(2, 0, 1).unsqueeze(0).unsqueeze(1)
 
         if self.shift:
-            score[:, :, -w_stride:].masked_fill_(self.ul_mask, float("-inf"))
-            score[:, :, w_stride - 1 :: w_stride].masked_fill_(
-                self.lr_mask, float("-inf")
+            score = score.masked_fill(
+                self.local_mask.unsqueeze(0).unsqueeze(2), float("-inf")
             )
 
         attn = F.softmax(score, -1)
@@ -145,9 +160,9 @@ class MultiHeadedLocalAttention(nn.Module):
 
         out = (
             out.view(
-                batch, self.n_head, h_stride, w_stride, window, window, self.dim_head
+                batch, h_stride, w_stride, self.n_head, window, window, self.dim_head
             )
-            .permute(0, 2, 4, 3, 5, 1, 6)
+            .permute(0, 1, 4, 2, 5, 3, 6)
             .reshape(batch, height, width, self.n_head * self.dim_head)
         )
         out = self.linear(out)
@@ -211,11 +226,27 @@ class PatchEmbedding(nn.Module):
         return out
 
 
+class PatchMerge(nn.Module):
+    def __init__(self, in_dim, out_dim, window_size):
+        super().__init__()
+
+        self.window_size = window_size
+        self.norm = nn.LayerNorm(in_dim * window_size * window_size)
+        self.linear = nn.Linear(in_dim * window_size * window_size, out_dim, bias=False)
+
+    def forward(self, input):
+        out = patchify(input, self.window_size)
+        out = self.norm(out)
+        out = self.linear(out)
+
+        return out
+
+
 def reduce_size(size, reduction):
     return (size[0] // reduction, size[1] // reduction)
 
 
-@config_model(name="swin_transformer", use_type=True)
+@config_model(name="swin_transformer", namespace="model", use_type=True)
 class SwinTransformer(nn.Module):
     def __init__(
         self,
@@ -248,21 +279,59 @@ class SwinTransformer(nn.Module):
                 reduction,
                 drop_ff,
                 drop_attn,
-                drop_path,
             )
 
-        self.block1 = make_block(0, 3, image_size, 4)
+        self.patch_embedding = PatchEmbedding(3, dims[0], 4)
+        self.block1 = make_block(0, 3, reduce_size(image_size, 4), 1)
         self.block2 = make_block(1, dims[0], reduce_size(image_size, 4), 2)
         self.block3 = make_block(2, dims[1], reduce_size(image_size, 4 * 2), 2)
         self.block4 = make_block(3, dims[2], reduce_size(image_size, 4 * 2 * 2), 2)
 
         self.final_linear = nn.Sequential(nn.LayerNorm(dims[-1]))
         linear = nn.Linear(dims[-1], n_class)
-        nn.init.normal_(linear.weight, std=0.01)
+        nn.init.normal_(linear.weight, std=0.02)
         nn.init.zeros_(linear.bias)
         self.classifier = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Flatten(1), linear)
 
         self.apply(self.init_weights)
+        self.set_dropout(None, drop_path)
+
+    def set_dropout(self, dropout, drop_path):
+        n_blocks = sum(self.depths)
+        dp_rate = [drop_path * float(i) / n_blocks for i in range(n_blocks)]
+
+        i = 0
+        for block in self.block1:
+            try:
+                block.set_drop_path(dp_rate[i])
+                i += 1
+
+            except:
+                continue
+
+        for block in self.block2:
+            try:
+                block.set_drop_path(dp_rate[i])
+                i += 1
+
+            except:
+                continue
+
+        for block in self.block3:
+            try:
+                block.set_drop_path(dp_rate[i])
+                i += 1
+
+            except:
+                continue
+
+        for block in self.block4:
+            try:
+                block.set_drop_path(dp_rate[i])
+                i += 1
+
+            except:
+                continue
 
     def init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -288,9 +357,11 @@ class SwinTransformer(nn.Module):
         reduction,
         drop_ff,
         drop_attn,
-        drop_path,
     ):
-        block = [PatchEmbedding(in_dim, dim, reduction)]
+        block = []
+
+        if reduction > 1:
+            block.append(PatchMerge(in_dim, dim, reduction))
 
         for i in range(depth):
             block.append(
@@ -304,14 +375,14 @@ class SwinTransformer(nn.Module):
                     shift=i % 2 == 0,
                     drop_ff=drop_ff,
                     drop_attn=drop_attn,
-                    drop_path=drop_path,
                 )
             )
 
         return nn.Sequential(*block)
 
     def forward(self, input):
-        out = self.block1(input.permute(0, 2, 3, 1))
+        out = self.patch_embedding(input.permute(0, 2, 3, 1))
+        out = self.block1(out)
         out = self.block2(out)
         out = self.block3(out)
         out = self.block4(out)
