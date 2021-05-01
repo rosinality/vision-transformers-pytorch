@@ -190,8 +190,11 @@ class EfficientNet(nn.Module):
         self.logit = nn.Linear(head_channel, n_class)
 
     def set_dropout(self, dropout, drop_path):
-        for block in self.blocks:
-            block.set_drop_path(drop_path)
+        n_blocks = len(self.blocks)
+        dp_rate = [drop_path * float(i) / n_blocks for i in range(n_blocks)]
+
+        for block, dp in zip(self.blocks, dp_rate):
+            block.set_drop_path(dp)
 
         self.dropout.p = dropout
 
