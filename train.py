@@ -1,15 +1,17 @@
 import argparse
 import os
 import sys
+import math
 from time import perf_counter
 
 import torch
 from torch import nn, optim
+from torch.cuda import amp
 from torch.nn.modules import adaptive
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from PIL import Image
-from tensorfn import load_arg_config, distributed as dist, Checker
+from tensorfn import load_arg_config, distributed as dist, Checker, get_logger
 
 import models
 from config import ImageNetConfig
@@ -22,6 +24,7 @@ from factory import (
     progressive_adaptive_regularization,
     wd_skip_fn,
 )
+from optimizer import adaptive_grad_clip
 from loss import MixLoss
 
 
@@ -49,15 +52,11 @@ def make_progressive_loader(stage, model, conf):
             "increasing": conf.training.randaug_increasing,
             "magnitude_std": conf.training.randaug_magnitude_std,
         },
-        adapt.mixup,
-        adapt.cutmix,
-    )
-    train_loader, valid_loader = make_dataloader(
-        train_set,
-        valid_set,
-        conf.training.dataloader.batch_size,
-        conf.distributed,
-        conf.training.dataloader.num_workers,
+        {
+            "mixup": adapt.mixup,
+            "cutmix": adapt.cutmix,
+            "mix_before_aug": conf.training.mix_before_aug,
+        },
     )
 
     try:
@@ -66,7 +65,25 @@ def make_progressive_loader(stage, model, conf):
     except:
         pass
 
-    return train_loader, valid_loader
+    if conf.training.progressive.grad_accumulation is not None:
+        grad_accum = conf.training.progressive.grad_accumulation[stage]
+
+    else:
+        grad_accum = conf.training.grad_accumulation
+
+    batch_size = conf.training.dataloader.batch_size // grad_accum
+
+    get_logger(mode=conf.logger).info(f"Using gradient accumulation {grad_accum}")
+
+    train_loader, valid_loader, train_sampler = make_dataloader(
+        train_set,
+        valid_set,
+        batch_size,
+        conf.distributed,
+        conf.training.dataloader.num_workers,
+    )
+
+    return train_loader, valid_loader, train_sampler, grad_accum
 
 
 def main(conf):
@@ -74,8 +91,13 @@ def main(conf):
     conf.distributed = conf.n_gpu > 1
     torch.backends.cudnn.benchmark = True
 
+    logger = get_logger(mode=conf.logger)
+    logger.info(conf.dict())
+
     model = conf.arch.make().to(device)
     model_ema = conf.arch.make().to(device)
+
+    logger.info(model)
 
     if conf.distributed:
         model = nn.parallel.DistributedDataParallel(
@@ -91,9 +113,11 @@ def main(conf):
         model_module = model
         accumulate(model_ema, model, 0)
 
+    grad_accum = conf.training.grad_accumulation
+
     if conf.training.progressive.step > 0:
         progressive_stage = 0
-        train_loader, valid_loader = make_progressive_loader(
+        train_loader, valid_loader, train_sampler, grad_accum = make_progressive_loader(
             progressive_stage, model_module, conf
         )
 
@@ -104,17 +128,25 @@ def main(conf):
             conf.training.valid_size,
             {
                 "n_augment": conf.training.randaug_layer,
-                "magnitude": conf.training.magnitude,
+                "magnitude": conf.training.randaug_magnitude,
                 "increasing": conf.training.randaug_increasing,
                 "magnitude_std": conf.training.randaug_magnitude_std,
+                "cutout": conf.training.randaug_cutout,
             },
-            conf.training.mixup,
-            conf.training.cutmix,
+            {
+                "mixup": conf.training.mixup,
+                "cutmix": conf.training.cutmix,
+                "mix_before_aug": conf.training.mix_before_aug,
+            },
+            conf.training.erasing,
         )
-        train_loader, valid_loader = make_dataloader(
+
+        batch_size = conf.training.dataloader.batch_size // grad_accum
+
+        train_loader, valid_loader, train_sampler = make_dataloader(
             train_set,
             valid_set,
-            conf.training.dataloader.batch_size,
+            batch_size,
             conf.distributed,
             conf.training.dataloader.num_workers,
         )
@@ -129,27 +161,19 @@ def main(conf):
     )
 
     optimizer = make_optimizer(conf.training, parameters)
-    epoch_len = len(train_loader)
+    epoch_len = math.ceil(len(train_loader) / grad_accum)
     scheduler = make_scheduler(conf.training, optimizer, epoch_len)
 
     step = 0
 
-    def checker_save(filename, *args):
-        torch.save(
-            {
-                "model": model_module.state_dict(),
-                "ema": model_ema.state_dict(),
-                "scheduler": scheduler.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "conf": conf,
-            },
-            filename,
-        )
+    scaler = amp.GradScaler(enabled=conf.fp16)
 
-    checker = conf.checker.make(checker_save)
-    checker.save("test")
+    checker = conf.checker.make()
 
     for epoch in range(conf.training.epoch):
+        if conf.distributed:
+            train_sampler.set_epoch(epoch)
+
         train(
             conf,
             step,
@@ -160,6 +184,8 @@ def main(conf):
             criterion_train,
             optimizer,
             scheduler,
+            scaler,
+            grad_accum,
         )
         step += epoch_len
 
@@ -178,7 +204,19 @@ def main(conf):
             loss=losses.avg,
             lr=optimizer.param_groups[0]["lr"],
         )
-        checker.save(f"epoch-{str(epoch + 1).zfill(3)}")
+        try:
+            checker.checkpoint(
+                {
+                    "model": model_module.state_dict(),
+                    "ema": model_ema.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "conf": conf,
+                },
+                f"epoch-{str(epoch + 1).zfill(3)}.pt",
+            )
+        except Exception as e:
+            print(e)
 
         if (
             conf.training.progressive.step > 0
@@ -190,12 +228,24 @@ def main(conf):
                 progressive_stage
                 < conf.training.epoch // conf.training.progressive.step
             ):
-                train_loader, valid_loader = make_progressive_loader(
+                train_loader, valid_loader, train_sampler, grad_accum = make_progressive_loader(
                     progressive_stage, model_module, conf
                 )
 
 
-def train(conf, step, epoch, loader, model, model_ema, criterion, optimizer, scheduler):
+def train(
+    conf,
+    step,
+    epoch,
+    loader,
+    model,
+    model_ema,
+    criterion,
+    optimizer,
+    scheduler,
+    scaler,
+    grad_accum,
+):
     device = "cuda"
 
     batch_time = Meter()
@@ -209,6 +259,8 @@ def train(conf, step, epoch, loader, model, model_ema, criterion, optimizer, sch
     agc_params = [p[1] for p in model.named_parameters() if "linear" not in p[0]]
     params = list(model.parameters())
 
+    logger = get_logger(mode=conf.logger)
+
     start = perf_counter()
     for i, (input, label1, label2, ratio) in enumerate(loader):
         # measure data loading time
@@ -218,26 +270,35 @@ def train(conf, step, epoch, loader, model, model_ema, criterion, optimizer, sch
         ratio = ratio.to(device=device, dtype=torch.float32)
         data_time.update(perf_counter() - start)
 
-        out = model(input)
-        loss = criterion(out, label1, label2, ratio)
+        with amp.autocast(enabled=conf.fp16):
+            out = model(input)
+            loss = criterion(out, label1, label2, ratio) / grad_accum
 
         prec1, prec5 = accuracy(out, label1, topk=(1, 5))
         batch = input.shape[0]
-        losses.update(loss.item(), batch)
+        losses.update(loss.item() * grad_accum, batch)
         top1.update(prec1.item(), batch)
         top5.update(prec5.item(), batch)
 
-        optimizer.zero_grad()
-        loss.backward()
+        scaler.scale(loss).backward()
 
-        if conf.training.agc > 0:
-            adaptive_grad_clip(agc_params, args.agc)
+        if ((i + 1) % grad_accum == 0) or (i + 1) == len(loader):
+            if conf.training.agc > 0 or conf.training.clip_grad_norm > 0:
+                if conf.fp16:
+                    scaler.unscale_(optimizer)
 
-        if conf.training.clip_grad_norm > 0:
-            nn.utils.clip_grad_norm_(params, conf.training.clip_grad_norm)
+                if conf.training.agc > 0:
+                    adaptive_grad_clip(agc_params, conf.training.agc)
 
-        scheduler.step()
-        optimizer.step()
+                if conf.training.clip_grad_norm > 0:
+                    nn.utils.clip_grad_norm_(params, conf.training.clip_grad_norm)
+
+            scheduler.step()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+
+        # optimizer.step()
         t = step + i
 
         if conf.training.ema > 0:
@@ -260,7 +321,7 @@ def train(conf, step, epoch, loader, model, model_ema, criterion, optimizer, sch
         if dist.is_primary() and i % conf.log_freq == 0:
             lr = optimizer.param_groups[0]["lr"]
 
-            print(
+            logger.info(
                 f"epoch: {epoch} ({i}/{len(loader)}); time: {batch_time.val:.3f} ({batch_time.avg:.2f}); "
                 f"data: {data_time.val:.3f} ({data_time.avg:.2f}); "
                 f"loss: {losses.val:.3f} ({losses.avg:.3f}); "
@@ -281,6 +342,8 @@ def valid(conf, loader, model, criterion):
     top5 = Meter()
 
     model.eval()
+
+    logger = get_logger(mode=conf.logger)
 
     start = perf_counter()
     for i, (input, label) in enumerate(loader):
@@ -308,7 +371,7 @@ def valid(conf, loader, model, criterion):
         start = perf_counter()
 
         if dist.is_primary() and i % conf.log_freq == 0:
-            print(
+            logger.info(
                 f"valid: {i}/{len(loader)}; time: {batch_time.val:.3f} ({batch_time.avg:.3f}); "
                 f"loss: {losses.val:.4f} ({losses.avg:.4f}); "
                 f"prec@1: {top1.val:.3f} ({top1.avg:.3f}); "
@@ -316,7 +379,9 @@ def valid(conf, loader, model, criterion):
             )
 
     if dist.is_primary():
-        print(f"validation finished: prec@1 {top1.avg:.3f}, prec@5 {top5.avg:.3f}")
+        logger.info(
+            f"validation finished: prec@1 {top1.avg:.3f}, prec@5 {top5.avg:.3f}"
+        )
 
     return top1.avg, top5.avg, losses
 

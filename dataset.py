@@ -126,19 +126,25 @@ class LMDBReader:
 
 
 class LMDBDataset(Dataset):
-    def __init__(self, path, transform):
+    def __init__(self, path, transform, decode=True):
         self.data = LMDBReader(path, reader="raw")
 
         self.transform = transform
+        self.decode = decode
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, index):
-        img_bytes = self.data[index]
-        class_id = int(img_bytes[:4].decode("utf-8"))
-        buffer = io.BytesIO(img_bytes[4:])
-        img = Image.open(buffer).convert("RGB")
-        img = self.transform(img)
+        img = self.data[index]
+        class_id = int(img[:4].decode("utf-8"))
+
+        if self.decode:
+            buffer = io.BytesIO(img[4:])
+            img = Image.open(buffer).convert("RGB")
+            img = self.transform(img)
+
+        else:
+            img = img[4:]
 
         return img, class_id

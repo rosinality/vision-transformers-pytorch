@@ -3,6 +3,7 @@ import random
 
 import numpy as np
 from PIL import Image
+import torch
 from torch.utils import data
 
 
@@ -36,15 +37,19 @@ class MixDataset(data.Dataset):
     def __getitem__(self, index):
         img1, label1 = self.dataset[index]
 
-        index2 = index
-        while index2 == index:
-            index2 = random.randrange(len(self.dataset))
-
-        img2, label2 = self.dataset[index2]
-
         apply_mixup = self.mixup > 0
         apply_cutmix = self.cutmix > 0
         ratio = 1
+
+        if apply_mixup or apply_cutmix:
+            index2 = index
+            while index2 == index:
+                index2 = random.randrange(len(self.dataset))
+
+            img2, label2 = self.dataset[index2]
+
+        else:
+            img2, label2 = img1, label1
 
         if apply_mixup and apply_cutmix:
             if index % 2 == 0:
@@ -55,7 +60,12 @@ class MixDataset(data.Dataset):
 
         if apply_mixup:
             ratio = random.betavariate(self.mixup, self.mixup)
-            img1 = Image.blend(img1, img2, 1 - ratio)
+
+            if isinstance(img1, torch.Tensor):
+                img1 = img1.mul(ratio).add_(img2, alpha=1 - ratio)
+
+            else:
+                img1 = Image.blend(img1, img2, 1 - ratio)
 
         if apply_cutmix:
             if self.cutmix == 1:
@@ -64,10 +74,17 @@ class MixDataset(data.Dataset):
             else:
                 ratio = random.betavariate(self.cutmix, self.cutmix)
 
-            x1, y1, x2, y2 = rand_bbox(img1.size, ratio)
-            img1.paste(img2.crop((x1, y1, x2, y2)), (x1, y1, x2, y2))
-            ratio = 1 - ((x2 - x1) * (y2 - y1) / (img1.size[0] * img1.size[1]))
+            if isinstance(img1, torch.Tensor):
+                x1, y1, x2, y2 = rand_bbox(img1.shape[1:], ratio)
+                img1[:, y1:y2, x1:x2] = img2[:, y1:y2, x1:x2]
+                ratio = 1 - ((x2 - x1) * (y2 - y1) / (img1.shape[1] * img1.shape[2]))
 
-        img1 = self.transform(img1)
+            else:
+                x1, y1, x2, y2 = rand_bbox(img1.size, ratio)
+                img1.paste(img2.crop((x1, y1, x2, y2)), (x1, y1, x2, y2))
+                ratio = 1 - ((x2 - x1) * (y2 - y1) / (img1.size[0] * img1.size[1]))
+
+        if self.transform is not None:
+            img1 = self.transform(img1)
 
         return img1, label1, label2, ratio

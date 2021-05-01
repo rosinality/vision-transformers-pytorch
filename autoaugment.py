@@ -1,6 +1,9 @@
 import random
+import math
 
+import torch
 from PIL import Image, ImageOps, ImageEnhance, ImageDraw
+from torchvision.transforms import functional as F
 
 import transforms
 from transforms import check_prob, PIL_INTER_MAP, RandomTransform
@@ -71,106 +74,165 @@ def shear_x(img, shear_x, mirror=True, resample=Image.NEAREST, fillcolor=None):
     shear_x = random_mirror(mirror, shear_x)
 
     return apply_affine(img, (0, 0), (shear_x, 0), resample, fillcolor)
+    return F.affine(
+        img,
+        angle=0.0,
+        translate=(0, 0),
+        scale=1.0,
+        shear=(math.degrees(shear_x), 0.0),
+        resample=resample,
+        fillcolor=fillcolor,
+    )
 
 
 def shear_y(img, shear_y, mirror=True, resample=Image.NEAREST, fillcolor=None):
     shear_y = random_mirror(mirror, shear_y)
 
     return apply_affine(img, (0, 0), (0, shear_y), resample, fillcolor)
+    return F.affine(
+        img,
+        angle=0.0,
+        translate=(0, 0),
+        scale=1.0,
+        shear=(0, math.degrees(shear_y)),
+        resample=resample,
+        fillcolor=fillcolor,
+    )
 
 
 def translate_x(img, translate_x, mirror=True, resample=Image.NEAREST, fillcolor=None):
     translate_x = random_mirror(mirror, translate_x)
 
     return apply_affine(img, (translate_x, 0), (0, 0), resample, fillcolor)
+    return F.affine(
+        img,
+        angle=0.0,
+        translate=(translate_x, 0),
+        scale=1.0,
+        shear=(0, 0),
+        resample=resample,
+        fillcolor=fillcolor,
+    )
 
 
 def translate_y(img, translate_y, mirror=True, resample=Image.NEAREST, fillcolor=None):
     translate_y = random_mirror(mirror, translate_y)
 
     return apply_affine(img, (0, translate_y), (0, 0), resample, fillcolor)
+    return F.affine(
+        img,
+        angle=0.0,
+        translate=(0, translate_y),
+        scale=1.0,
+        shear=(0, 0),
+        resample=resample,
+        fillcolor=fillcolor,
+    )
 
 
-def rotate(img, rotate_value, mirror=True, resample=Image.NEAREST, fillcolor=None):
-    rotate_value = random_mirror(mirror, rotate_value)
+def rotate(img, rotate, mirror=True, resample=Image.NEAREST, fillcolor=None):
+    rotate = random_mirror(mirror, rotate)
 
-    return img.rotate(rotate_value, resample=resample, fillcolor=fillcolor)
+    return img.rotate(rotate, resample=resample, fillcolor=fillcolor)
+    return F.rotate(img, rotate, resample=resample, fillcolor=fillcolor)
 
 
 def posterize(img, bits):
     return ImageOps.posterize(img, bits)
+    return F.posterize(img, bits)
 
 
 def cutout(img, size, fillcolor=None):
-    x = random.random()
-    y = random.random()
+    if isinstance(img, torch.Tensor):
+        pass
 
-    w, h = img.size
-    c_x = int(x * w)
-    c_y = int(y * h)
+    else:
+        x = random.random()
+        y = random.random()
 
-    x0 = max(0, c_x - size)
-    x1 = w - max(0, w - c_x - size) - 1
-    y0 = max(0, c_y - size)
-    y1 = h - max(0, h - c_y - size) - 1
+        w, h = img.size
+        c_x = int(x * w)
+        c_y = int(y * h)
 
-    xy = (x0, y0, x1, y1)
-    img = img.copy()
-    ImageDraw.Draw(img).rectangle(xy, fillcolor)
+        x0 = max(0, c_x - size)
+        x1 = w - max(0, w - c_x - size) - 1
+        y0 = max(0, c_y - size)
+        y1 = h - max(0, h - c_y - size) - 1
 
-    return img
+        xy = (x0, y0, x1, y1)
+        img = img.copy()
+        ImageDraw.Draw(img).rectangle(xy, fillcolor)
+
+        return img
 
 
 def solarize(img, threshold):
     return ImageOps.solarize(img, threshold)
+    return F.posterize(img, solarize)
 
 
 def solarize_add(img, add, threshold=128):
-    lut = []
+    if isinstance(img, torch.Tensor):
+        mask = img < threshold
 
-    for i in range(256):
-        if i < threshold:
-            lut.append(min(255, i + add))
+        solarized = img.clamp(max=255 - add) + add
+        result = mask * solarized + ~mask * img
 
-        else:
-            lut.append(i)
-
-    if img.mode in ("L", "RGB"):
-        if img.mode == "RGB" and len(lut) == 256:
-            lut = lut + lut + lut
-
-        return img.point(lut)
+        return result
 
     else:
-        return img
+        lut = []
+
+        for i in range(256):
+            if i < threshold:
+                lut.append(min(255, i + add))
+
+            else:
+                lut.append(i)
+
+        if img.mode in ("L", "RGB"):
+            if img.mode == "RGB" and len(lut) == 256:
+                lut = lut + lut + lut
+
+            return img.point(lut)
+
+        else:
+            return img
 
 
-def saturation(img, saturate_value):
-    return ImageEnhance.Color(img).enhance(saturate_value)
+def saturation(img, saturate):
+    return ImageEnhance.Color(img).enhance(saturate)
+    return F.adjust_saturation(img, saturate_value)
 
 
-def contrast(img, contrast_value):
-    return ImageEnhance.Contrast(img).enhance(contrast_value)
+def contrast(img, contrast):
+    return ImageEnhance.Contrast(img).enhance(contrast)
+    return F.adjust_contrast(img, contrast)
 
 
-def brightness(img, brightness_value):
-    return ImageEnhance.Brightness(img).enhance(brightness_value)
+def brightness(img, brightness):
+    return ImageEnhance.Brightness(img).enhance(brightness)
+    return F.adjust_brightness(img, brightness)
 
 
-def sharpness(img, sharpness_value):
-    return ImageEnhance.Sharpness(img).enhance(sharpness_value)
+def sharpness(img, sharpness):
+    return ImageEnhance.Sharpness(img).enhance(sharpness)
+    return F.adjust_sharpness(img, sharpness)
 
 
 def invert(img):
     return ImageOps.invert(img)
+    return F.invert(img)
 
 
 def auto_contrast(img):
     return ImageOps.autocontrast(img)
+    return F.autocontrast(img)
 
 
 def equalize(img):
     return ImageOps.equalize(img)
+    return F.equalize(img)
 
 
 class ShearX(AutoAugmentAffine):
@@ -555,6 +617,13 @@ class RandAugment:
             ]
         # fmt: on
 
+        if cutout == 0:
+            augment_list.remove("Cutout")
+
+        self.cutout = cutout
+        self.translate = translate
+        self.fillcolor = fillcolor
+
         self.augment = []
         for augment in augment_list:
             _, augment_fn, reparam_fn = AUTOAUGMENT_MAP[augment]
@@ -584,7 +653,10 @@ class RandAugment:
             )
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(n_augment={self.n_augment}, magnitude={self.magnitude})"
+        return (
+            f"{self.__class__.__name__}(n_augment={self.n_augment}, magnitude={self.magnitude}, cutout={self.cutout},"
+            f" translate={self.translate}, fillcolor={self.fillcolor})"
+        )
 
     def __call__(self, img):
         augments = random.choices(self.augment, k=self.n_augment)
