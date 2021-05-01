@@ -55,9 +55,9 @@ class NFBlock(nn.Module):
 
     def forward(self, input):
         out = self.beta * self.activation(input)
-        skip = out
+        skip = input
         if self.skip is not None:
-            skip = self.skip(skip)
+            skip = self.skip(out)
 
         out = self.conv1(out)
         out = self.conv2(self.activation(out))
