@@ -1,5 +1,5 @@
 import torch
-from torch import nn
+from torch import nn, distributed as dist
 from torch.nn import functional as F
 
 
@@ -84,3 +84,70 @@ class MixLoss(nn.Module):
             loss = loss / target1.shape[0]
 
         return loss
+
+
+class DINOLoss(nn.Module):
+    def __init__(
+        self,
+        out_dim,
+        n_crop,
+        warmup_teacher_temperature,
+        teacher_temperature,
+        warmup_teacher_epoch,
+        n_epoch,
+        student_temperature=0.1,
+        center_momentum=0.9,
+    ):
+        super().__init__()
+
+        self.student_temperature = student_temperature
+        self.center_momentum = center_momentum
+        self.n_crop = n_crop
+        self.register_buffer("center", torch.zeros(1, out_dim))
+
+        self.teacher_temperature_schedule = torch.cat(
+            (
+                torch.linspace(
+                    warmup_teacher_temperature,
+                    teacher_temperature,
+                    warmup_teacher_epoch,
+                ),
+                torch.ones(n_epoch - warmup_teacher_epoch) * teacher_temperature,
+            )
+        ).tolist()
+
+    def forward(self, student_output, teacher_output, epoch):
+        student_out = student_output / self.student_temperature
+        student_out = student_out.chunk(self.n_crop)
+
+        temperature = self.teacher_temperature_schedule[epoch]
+        teacher_out = torch.softmax((teacher_output - self.center) / temperature, -1)
+        teacher_out = teacher_out.detach().chunk(2)
+
+        total_loss = 0
+        n_loss_term = 0
+
+        for i_q, q in enumerate(teacher_out):
+            for v in range(len(student_out)):
+                if v == i_q:
+                    continue
+
+                loss = torch.sum(-q * torch.log_softmax(student_out[v], -1), -1)
+                total_loss += loss.mean()
+                n_loss_term += 1
+
+        total_loss /= n_loss_term
+        self.update_center(teacher_output)
+
+        return total_loss
+
+    @torch.no_grad()
+    def update_center(self, teacher_out):
+        batch_center = torch.sum(teacher_out, dim=0, keepdim=True)
+        dist.all_reduce(batch_center)
+        batch_center = batch_center / (len(teacher_out) * dist.get_world_size())
+
+        self.center.mul_(self.center_momentum).add_(
+            batch_center, alpha=1 - self.center_momentum
+        )
+

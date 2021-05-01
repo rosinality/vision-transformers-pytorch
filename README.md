@@ -5,6 +5,14 @@ Implementation of various Vision Transformers (and other vision models) I found 
 
 Currently I have implemented:
 
+### ViT (https://arxiv.org/abs/2010.11929)
+
+Implemented.
+
+### DINO (https://arxiv.org/abs/2104.14294)
+
+Implemented. Currently testing.
+
 ### NFNet (https://arxiv.org/abs/2102.06171)
 
 Tested and got 83.17 top-1 accuracy with NFNet-F0

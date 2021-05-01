@@ -1,4 +1,34 @@
+import math
+
 import torch
+
+
+def cosine_schedule(base, final, step, warmup=0, warmup_start=0):
+    if warmup > 0:
+        warmup_schedule = torch.linspace(warmup_start, base, warmup)
+
+    else:
+        warmup_schedule = torch.tensor([])
+
+    iters = torch.arange(step - warmup)
+    schedule = torch.tensor(
+        [
+            final + 0.5 * (base - final) * (1 + math.cos(math.pi * i / (len(iters))))
+            for i in iters
+        ]
+    )
+    schedule = torch.cat((warmup_schedule, schedule)).tolist()
+
+    return schedule
+
+
+def cancel_last_layer_grad(epoch, model, freeze):
+    if epoch >= freeze:
+        return
+
+    for n, p in model.named_parameters():
+        if "last" in n:
+            p.grad = None
 
 
 class Meter(object):
@@ -74,7 +104,7 @@ def add_weight_decay(named_parameters, weight_decay, check_skip_fn):
 
     return (
         (
-            {"params": no_decay, "weight_decay": 0.0},
+            {"params": no_decay, "weight_decay": 0.0, "no_decay": True},
             {"params": decay, "weight_decay": weight_decay},
         ),
         (no_decay_names, decay_names),

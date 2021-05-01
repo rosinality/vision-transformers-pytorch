@@ -211,7 +211,7 @@ def main(conf):
                     "ema": model_ema.state_dict(),
                     "scheduler": scheduler.state_dict(),
                     "optimizer": optimizer.state_dict(),
-                    "conf": conf,
+                    "conf": conf.dict(),
                 },
                 f"epoch-{str(epoch + 1).zfill(3)}.pt",
             )
