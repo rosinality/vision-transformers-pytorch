@@ -19,7 +19,7 @@ except ImportError:
 from autoaugment import RandAugment
 from dataset import LMDBDataset
 from mix_dataset import MixDataset
-from random_erasing import RandomErasing
+from transforms import RandomErasing
 
 
 def wd_skip_fn(skip_type):
@@ -32,6 +32,9 @@ def wd_skip_fn(skip_type):
 
         elif skip_type == "vit":
             return "bias" in name or "cls" in name or "norm" in name or param.ndim == 1
+
+        elif skip_type == "dino":
+            return "bias" in name or param.ndim == 1
 
     return check_wd_skip_fn
 
@@ -141,6 +144,16 @@ def make_dali_dataloader(
     path, train_size, valid_size, train_set, valid_set, batch, distributed, n_worker
 ):
     pass
+
+
+def make_augment_dataset(path, train_transform, valid_transform):
+    train_dir = os.path.join(nsml.DATASET_PATH, path, "train.lmdb")
+    valid_dir = os.path.join(nsml.DATASET_PATH, path, "valid.lmdb")
+
+    train_set = LMDBDataset(train_dir, train_transform)
+    valid_set = LMDBDataset(valid_dir, valid_transform)
+
+    return train_set, valid_set
 
 
 def make_dataset(
