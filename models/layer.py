@@ -113,6 +113,11 @@ class StochasticDepth(nn.Module):
 
         return input * mask
 
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(p={self.p}, scale_by_keep={self.scale_by_keep})"
+        )
+
 
 class SqueezeExcite(nn.Sequential):
     def __init__(
@@ -173,3 +178,19 @@ class DropPath(nn.Module):
         out = input / p * mask
 
         return out
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(p={self.p})"
+
+
+class PositionwiseFeedForward(nn.Sequential):
+    def __init__(self, in_dim, dim=None, out_dim=None, activation=nn.SiLU, dropout=0):
+        dim = in_dim if dim is None else dim
+        out_dim = in_dim if out_dim is None else out_dim
+
+        super().__init__(
+            nn.Linear(in_dim, dim),
+            activation(),
+            nn.Dropout(dropout),
+            nn.Linear(dim, out_dim),
+        )

@@ -7,22 +7,9 @@ from torch.nn import functional as F
 from tensorfn.config import config_model
 from pydantic import StrictInt, StrictFloat
 
-from .layer import DropPath, tuple2
+from .layer import DropPath, tuple2, PositionwiseFeedForward
 
 LayerNorm = lambda x: nn.LayerNorm(x, eps=1e-6)
-
-
-class PositionwiseFeedForward(nn.Sequential):
-    def __init__(self, in_dim, dim=None, out_dim=None, activation=nn.SiLU, dropout=0):
-        dim = in_dim if dim is None else dim
-        out_dim = in_dim if out_dim is None else out_dim
-
-        super().__init__(
-            nn.Linear(in_dim, dim),
-            activation(),
-            nn.Linear(dim, out_dim),
-            nn.Dropout(dropout),
-        )
 
 
 def patchify(input, size):
