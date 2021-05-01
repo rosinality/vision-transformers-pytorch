@@ -129,3 +129,8 @@ dmypy.json
 .pyre/
 
 setup.py
+.nsmlignore
+experiment/
+*_s3.conf
+trainer.py
+precise_bn.py
