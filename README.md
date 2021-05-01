@@ -15,13 +15,19 @@ Tested and got 78.94 top-1 accuracy with PVT-Small
 
 ### Swin Transformer (https://arxiv.org/abs/2103.14030)
 
-Currently testing Swin-S
+Tested and got 82.192 on top-1. Re-experimenting with random erasing.
 
 ### Halo Transformer (https://arxiv.org/abs/2103.12731)
 
+Implemented.
+
 ### EfficientNetV2 (https://arxiv.org/abs/2104.00298)
 
-Currently testing EfficienetV2-S. Seems promising, especially progressive adaptive regularization.
+Tested and got 82.862 on top-1 @ 300px, 83.2 on top-1 @ 380px
+
+### Twins-SVT (https://arxiv.org/abs/2104.13840)
+
+Implemented.
 
 ## Usage
 
@@ -36,5 +42,5 @@ I think just using `torchvision.datasets` will be better. I will change to it la
 Then you can do training.
 
 ```bash
-python train.py --conf [CONFIG FILE] --n_gpu [NUMBER OF GPUS] [Config overrides in form of key=value]
+python train.py --conf [CONFIG FILE] --n_gpu [NUMBER OF GPUS] [Config overrides in the form of key=value]
 ```
